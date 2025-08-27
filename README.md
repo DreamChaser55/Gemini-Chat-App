@@ -64,7 +64,7 @@ This application allows users to chat with various Gemini models through a clean
     * If you didn't create the API key file, paste your key into the dialog.
     * Click "Load Models" to fetch the available Gemini models.
     * Select a model, give your conversation a name, and click "OK".
-    * Start typing in the "Prompt" panel and click "Send"!
+    * Start typing in the "Prompt" panel and click "Send" or press `Ctrl+Enter`!
 
 ## Code Structure
 
