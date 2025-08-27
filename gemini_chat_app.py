@@ -9,7 +9,7 @@ try:
     # Attempt to import necessary pywin32 modules
     import win32gui
     import win32con
-    import struct
+    import win32gui_struct
     # Flag to indicate if flashing is supported (Windows and pywin32 installed)
     _FLASH_WINDOW_SUPPORTED = sys.platform == 'win32'
 except ImportError:
@@ -284,7 +284,6 @@ class AIChatApp:
         self.active_conversation = None  # Currently selected Conversation object
         self.conversation_names = tk.StringVar()  # For Combobox values
         self.conversation_name_list = []  # List of conversation names for Combobox
-        self.conversation_ids = {}  # Dictionary to store conversation name -> list of message node IDs
         self.message_node_to_content = {}  # Dictionary to map Treeview message node IDs to full message content
         self.conversation_counter = 1  # Counter for conversation names
         self.current_conversation_api_key_display = tk.StringVar(value="API Key: N/A")  # For API Key display label
@@ -297,7 +296,7 @@ class AIChatApp:
 
         self._create_widgets()
 
-        self.root.state('zoomed')  # Maximize window
+        self._maximize_window()  # Cross-platform maximize window
 
     def _setup_dark_theme(self):
         """Configures ttk styles for a dark theme."""
@@ -519,9 +518,18 @@ class AIChatApp:
         self.prompt_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.prompt_text_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # Keyboard shortcut: Ctrl+Enter to send
+        self.prompt_text_editor.bind("<Control-Return>", self._on_ctrl_enter_send)
+        self.prompt_text_editor.bind("<Control-KP_Enter>", self._on_ctrl_enter_send)
+
         # Button to send the prompt (below the editor frame)
         self.send_button = ttk.Button(prompt_frame, text="Send", command=self.send_prompt)
         self.send_button.pack(pady=5)
+
+    def _on_ctrl_enter_send(self, event):
+        """Handler for Ctrl+Enter to send the prompt."""
+        self.send_prompt()
+        return "break"
 
     def _insert_message_to_treeview(self, role, message_content):
         """
@@ -567,21 +575,10 @@ class AIChatApp:
 
         if ai_reply_text:
             # Add user prompt and AI reply to Treeview
-            current_conversation_name = self.conversation_combobox.get()  # Get conversation name from combobox
-            if not current_conversation_name:  # Should not happen as combobox is readonly, but for safety
-                print("Error: No active conversation name found in combobox.")
-                self.total_tokens_used_display.set("Tokens: Error") # Update status on error
-                return
 
             # Use _insert_message_to_treeview to add messages and get node IDs
             user_message_node_id = self._insert_message_to_treeview("user", prompt_text) # Insert user message
             ai_message_node_id = self._insert_message_to_treeview("model", ai_reply_text) # Insert AI reply
-
-            if current_conversation_name not in self.conversation_ids:
-                self.conversation_ids[current_conversation_name] = [] # Initialize list if conversation name is new (though it should exist)
-
-            self.conversation_ids[current_conversation_name].append(user_message_node_id)  # Store message node ID
-            self.conversation_ids[current_conversation_name].append(ai_message_node_id)  # Store message node ID
 
             # Store full message content associated with Treeview node IDs
             self.message_node_to_content[user_message_node_id] = {"role": "user", "message_text": prompt_text}
@@ -627,8 +624,13 @@ class AIChatApp:
             # Timeout: 0 uses default cursor blink rate
             timeout = 0
 
-            # Call FlashWindowEx
-            win32gui.FlashWindowEx(hwnd, flags, count, timeout)
+            try:
+                # Preferred: use win32gui_struct to pack FLASHWINFO correctly on 32/64-bit
+                info = win32gui_struct.PackFLASHWINFO(hwnd, flags, count, timeout)
+                win32gui.FlashWindowEx(info)
+            except Exception:
+                # Fallback: simple FlashWindow if FlashWindowEx packing fails
+                win32gui.FlashWindow(hwnd, True)
 
         except Exception as e:
             print(f"Warning: Could not flash window taskbar icon: {e}")
@@ -648,7 +650,7 @@ class AIChatApp:
     def _on_treeview_message_select(self, event):
         """
         Handles the event when a message is selected in the Treeview.
-        Displays the selected message in the Message Text area.
+        Displays the selected message in the Message Text area and caches token counts.
         """
 
         selected_item = self.messages_tree.selection()
@@ -660,17 +662,20 @@ class AIChatApp:
 
         # Find and display the message content.
         if selected_node_id in self.message_node_to_content:
-            message_content = self.message_node_to_content[selected_node_id]['message_text'] # Get full message from dict
+            message_entry = self.message_node_to_content[selected_node_id]
+            message_content = message_entry['message_text'] # Get full message from dict
             self._display_message(message_content) # Display the full message
 
-            # Token counting
-            if self.active_conversation and self.active_conversation.gemini_chat_session.client:
+            # Token counting with cache
+            if 'token_count' in message_entry:
+                token_info_text = f"Tokens: {message_entry['token_count']}"
+            elif self.active_conversation and self.active_conversation.gemini_chat_session.client:
                 try:
                     client = self.active_conversation.gemini_chat_session.client
                     model_name = self.active_conversation.get_model_name()
                     token_count = client.models.count_tokens(model=model_name, contents=message_content).total_tokens
+                    message_entry['token_count'] = token_count  # cache
                     token_info_text = f"Tokens: {token_count}"  # Set text for the token count label
-
                 except Exception as e:
                     print(f"Error counting tokens for selected message: {e}")
                     token_info_text = "Tokens: Error"  # Set error text for the token count label
@@ -787,9 +792,6 @@ class AIChatApp:
         self.message_node_to_content = {} # Clear message content dictionary when redrawing conversation
         self._clear_message_display() # Clear Message display area when switching conversations
 
-        conversation_name = conversation.name # Get conversation name to use as key for conversation_ids
-        self.conversation_ids[conversation_name] = [] # Ensure conversation_ids has an entry for this conversation
-
         history = conversation.get_history()
         for message in history:
             role = message['role']
@@ -798,7 +800,6 @@ class AIChatApp:
             # Use _insert_message_to_treeview to add messages and get node IDs
             message_node_id = self._insert_message_to_treeview(role, message_text)
 
-            self.conversation_ids[conversation_name].append(message_node_id) # Store message node ID under conversation name
             self.message_node_to_content[message_node_id] = message # Store full message content
 
     def _clear_message_display(self):
@@ -909,6 +910,25 @@ class AIChatApp:
         except Exception as e:
             print(f"Error copying message text: {e}")
             messagebox.showerror("Error", f"An unexpected error occurred during copy:\n{e}")
+
+    def _maximize_window(self):
+        """Attempt to maximize the window cross-platform."""
+        try:
+            # Works on Windows, some Linux WMs
+            self.root.state('zoomed')
+        except Exception:
+            try:
+                # Some Tk builds support -zoomed attribute (Linux)
+                self.root.attributes('-zoomed', True)
+            except Exception:
+                try:
+                    # Fallback: set window to screen size
+                    self.root.update_idletasks()
+                    w = self.root.winfo_screenwidth()
+                    h = self.root.winfo_screenheight()
+                    self.root.geometry(f"{w}x{h}+0+0")
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
